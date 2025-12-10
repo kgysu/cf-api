@@ -36,7 +36,7 @@ func main() {
 }
 
 func run() error {
-	apiKey = os.Getenv("CF-API-KEY")
+	apiKey = os.Getenv("CF_API_KEY")
 	if apiKey == "" {
 		return errors.New("no api key set in env CF-API-KEY")
 	}
