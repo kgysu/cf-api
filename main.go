@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -36,6 +37,15 @@ func main() {
 }
 
 func run() error {
+	tbcFlag := flag.Bool("tbc", false, "enable for TBC version of the game")
+	// gameVersionFlag := flag.String("version", "67408", "specify game version, default classic, classic tbc=73246")
+	flag.Parse()
+	gameVersion := "67408"
+	if *tbcFlag {
+		gameVersion = "73246"
+	}
+	fmt.Println("downloading for game version:", gameVersion)
+
 	apiKey = os.Getenv("CF_API_KEY")
 	if apiKey == "" {
 		return errors.New("no api key set in env CF-API-KEY")
@@ -70,7 +80,7 @@ func run() error {
 		ids = append(ids, id)
 	}
 
-	urls, failed, err := getDonwloadUrls(ids)
+	urls, failed, err := getDonwloadUrls(ids, gameVersion)
 	if err != nil {
 		return err
 	}
@@ -126,7 +136,7 @@ func run() error {
 	return nil
 }
 
-func getDonwloadUrls(ids []int) ([]string, []string, error) {
+func getDonwloadUrls(ids []int, gameVersion string) ([]string, []string, error) {
 	results := make([]string, 0)
 	failed := make([]string, 0)
 
@@ -139,8 +149,7 @@ func getDonwloadUrls(ids []int) ([]string, []string, error) {
 		}
 		time.Sleep(100 * time.Millisecond)
 
-		req, err := http.NewRequest("GET",
-			fmt.Sprintf("https://api.curseforge.com/v1/mods/%d/files?gameVersionTypeId=67408", id),
+		req, err := http.NewRequest("GET", fmt.Sprintf("https://api.curseforge.com/v1/mods/%d/files?gameVersionTypeId=%s", id, gameVersion),
 			nil)
 		if err != nil {
 			slog.Error("new req err", "err", err)
@@ -271,41 +280,104 @@ func extractZip(filename string) error {
 		return fmt.Errorf("failed to get current working directory: %w", err)
 	}
 
-	zipReader, err := zip.OpenReader(filename)
+	r, err := zip.OpenReader(filename)
 	if err != nil {
 		return fmt.Errorf("failed to open zip file: %w", err)
 	}
-	defer zipReader.Close()
+	defer r.Close()
 
-	for _, file := range zipReader.File {
-		filePath := filepath.Join(destDir, file.Name)
+	for _, f := range r.File {
+		targetPath := filepath.Join(destDir, f.Name)
 
-		if file.FileInfo().IsDir() {
-			if err := os.MkdirAll(filePath, os.ModePerm); err != nil {
+		// --- Zip Slip protection ---
+		if !strings.HasPrefix(
+			targetPath,
+			filepath.Clean(destDir)+string(os.PathSeparator),
+		) {
+			return fmt.Errorf("illegal file path in zip: %s", f.Name)
+		}
+
+		if f.FileInfo().IsDir() {
+			if err := os.MkdirAll(targetPath, 0755); err != nil {
 				return fmt.Errorf("failed to create directory: %w", err)
 			}
 			continue
 		}
 
-		fileInZip, err := file.Open()
-		if err != nil {
-			return fmt.Errorf("failed to open zip file entry: %w", err)
+		// --- Ensure parent directory exists ---
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+			return fmt.Errorf("failed to create parent directory: %w", err)
 		}
-		defer fileInZip.Close()
 
-		outFile, err := os.Create(filePath)
+		src, err := f.Open()
 		if err != nil {
+			return fmt.Errorf("failed to open zip entry: %w", err)
+		}
+
+		dst, err := os.OpenFile(
+			targetPath,
+			os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
+			f.Mode(),
+		)
+		if err != nil {
+			src.Close()
 			return fmt.Errorf("failed to create file from zip: %w", err)
 		}
-		defer outFile.Close()
 
-		if _, err := io.Copy(outFile, fileInZip); err != nil {
+		_, err = io.Copy(dst, src)
+
+		// Close immediately (not deferred)
+		src.Close()
+		dst.Close()
+
+		if err != nil {
 			return fmt.Errorf("failed to extract file: %w", err)
 		}
 	}
+
 	return nil
 }
 
+//	func extractZip(filename string) error {
+//		destDir, err := os.Getwd()
+//		if err != nil {
+//			return fmt.Errorf("failed to get current working directory: %w", err)
+//		}
+//
+//		zipReader, err := zip.OpenReader(filename)
+//		if err != nil {
+//			return fmt.Errorf("failed to open zip file: %w", err)
+//		}
+//		defer zipReader.Close()
+//
+//		for _, file := range zipReader.File {
+//			filePath := filepath.Join(destDir, file.Name)
+//
+//			if file.FileInfo().IsDir() {
+//				if err := os.MkdirAll(filePath, os.ModePerm); err != nil {
+//					return fmt.Errorf("failed to create directory: %w", err)
+//				}
+//				continue
+//			}
+//
+//			fileInZip, err := file.Open()
+//			if err != nil {
+//				return fmt.Errorf("failed to open zip file entry: %w", err)
+//			}
+//			defer fileInZip.Close()
+//
+//			outFile, err := os.Create(filePath)
+//			if err != nil {
+//				return fmt.Errorf("failed to create file from zip: %w", err)
+//			}
+//			defer outFile.Close()
+//
+//			if _, err := io.Copy(outFile, fileInZip); err != nil {
+//				return fmt.Errorf("failed to extract file: %w", err)
+//			}
+//		}
+//		return nil
+//	}
 func cleanupArchive(filename string) {
 	if err := os.Remove(filename); err != nil {
 		slog.Error("Failed to delete archive file", "file", filename, "error", err)
